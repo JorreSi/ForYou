@@ -1,18 +1,23 @@
 import streamlit as st
 import pandas as pd
-import os
-import time
 from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Love Letters", page_icon="💌", layout="centered")
 
-# --- CUSTOM STYLING ---
+# --- FORCEER DARK MODE ---
 st.markdown("""
 <style>
     /* Algemeen lettertype: Georgia */
     html, body, [class*="css"], .stTextInput, .stTextArea {
         font-family: 'Georgia', serif;
+        color: #fafafa;
+    }
+    .stApp {
+        background-color: #0e1117;
     }
     
     /* De titel styling: Goud */
@@ -21,6 +26,16 @@ st.markdown("""
         color: #d4af37 !important;
         text-shadow: 1px 1px 2px #000000;
         font-weight: normal;
+    }
+
+    /* Input velden donker maken */
+    .stTextInput > div > div > input {
+        color: #fafafa;
+        background-color: #262730;
+    }
+    .stTextArea > div > div > textarea {
+        color: #fafafa;
+        background-color: #262730;
     }
 
     /* NAVIGATIE MENU (Tabs) */
@@ -57,8 +72,48 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNCTIES ---
+# --- GOOGLE SHEETS VERBINDING ---
+def get_db_connection():
+    # We halen de JSON sleutel uit de secrets
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    
+    # Hier laden we de 'google_credentials' string die we in Secrets hebben geplakt
+    creds_dict = json.loads(st.secrets["google_credentials"])
+    
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    
+    # Open de sheet met de exacte naam
+    sheet = client.open("love_letters_db").sheet1
+    return sheet
 
+def load_letters():
+    try:
+        sheet = get_db_connection()
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        
+        # Als de sheet leeg is of kolommen mist, geef leeg frame terug
+        if df.empty or "Author" not in df.columns:
+            return pd.DataFrame(columns=["Date", "Author", "Title", "Message"])
+            
+        return df
+    except Exception as e:
+        st.error(f"Kan geen verbinding maken met de database: {e}")
+        return pd.DataFrame(columns=["Date", "Author", "Title", "Message"])
+
+def save_letter(author, title, message):
+    try:
+        sheet = get_db_connection()
+        date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Voeg een nieuwe rij toe aan Google Sheets
+        sheet.append_row([date_str, author, title, message])
+        return True
+    except Exception as e:
+        st.error(f"Fout bij opslaan: {e}")
+        return False
+
+# --- LOGIN ---
 def check_login():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -84,22 +139,6 @@ def check_login():
     
     return True
 
-def load_letters():
-    if not os.path.exists("letters.csv"):
-        return pd.DataFrame(columns=["Date", "Author", "Title", "Message"])
-    return pd.read_csv("letters.csv")
-
-def save_letter(author, title, message):
-    df = load_letters()
-    new_entry = pd.DataFrame({
-        "Date": [datetime.now().strftime("%Y-%m-%d %H:%M")],
-        "Author": [author],
-        "Title": [title],
-        "Message": [message]
-    })
-    df = pd.concat([df, new_entry], ignore_index=True)
-    df.to_csv("letters.csv", index=False)
-
 # --- HOOFD PROGRAMMA ---
 
 if check_login():
@@ -115,28 +154,30 @@ if check_login():
     # --- TAB 1: LATEST LETTER ---
     with tab1:
         df = load_letters()
-        partner_letters = df[df["Author"] == partner]
-        
-        if not partner_letters.empty:
-            last_letter = partner_letters.iloc[-1]
+        # Filter op partner
+        if not df.empty and "Author" in df.columns:
+            partner_letters = df[df["Author"] == partner]
             
-            st.markdown(f"<h1 style='text-align: center;'>New Letter Arrived</h1>", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
+            if not partner_letters.empty:
+                last_letter = partner_letters.iloc[-1]
+                
+                st.markdown(f"<h1 style='text-align: center;'>New Letter Arrived</h1>", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
 
-            # AANPASSING: De titel van de brief staat nu in de 'klik-balk'
-            with st.expander(f"🌹 {last_letter['Title']}", expanded=False):
-                st.write(f"<div style='text-align: center; color: grey; margin-bottom: 20px;'>Received on {last_letter['Date']}</div>", unsafe_allow_html=True)
-                
-                # Brief inhoud
-                st.markdown(f"""
-                <div class="letter-paper">
-                    {last_letter['Message'].replace(chr(10), '<br>')}
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.markdown("<br><div style='text-align: center;'>🖤</div>", unsafe_allow_html=True)
+                with st.expander(f"🌹 {last_letter['Title']}", expanded=False):
+                    st.write(f"<div style='text-align: center; color: grey; margin-bottom: 20px;'>Received on {last_letter['Date']}</div>", unsafe_allow_html=True)
+                    
+                    st.markdown(f"""
+                    <div class="letter-paper">
+                        {str(last_letter['Message']).replace(chr(10), '<br>')}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.markdown("<br><div style='text-align: center;'>🖤</div>", unsafe_allow_html=True)
+            else:
+                st.info(f"No letters from {partner} yet. Maybe you should write one first?")
         else:
-            st.info(f"No letters from {partner} yet. Maybe you should write one first?")
+            st.info("Database is empty or loading...")
 
     # --- TAB 2: WRITE NEW ---
     with tab2:
@@ -146,18 +187,20 @@ if check_login():
         
         with st.form("letter_form"):
             title = st.text_input("Subject / Title", placeholder="e.g. My endless love...")
-            
-            message = st.text_area("Your Message", height=300, label_visibility="collapsed", placeholder="My Dearest...\n\nI want to tell you that **I love you** so much.")
+            message = st.text_area("Your Message", height=300, label_visibility="collapsed", placeholder="My Dearest...")
             
             sent = st.form_submit_button("Send 🕊️")
             
             if sent:
                 if message and title:
-                    save_letter(me, title, message)
-                    st.success("Sent! Sending you back to the home screen...")
-                    st.balloons()
-                    time.sleep(2)
-                    st.rerun()
+                    with st.spinner("Sending to the cloud..."):
+                        if save_letter(me, title, message):
+                            st.success("Sent! Saved safely in the cloud ☁️")
+                            st.balloons()
+                            # Wacht even zodat ze de ballonnen zien
+                            import time
+                            time.sleep(2)
+                            st.rerun()
                 else:
                     st.warning("A letter needs both a Title and a Message.")
 
@@ -166,14 +209,16 @@ if check_login():
         st.subheader("Memories")
         df = load_letters()
         
-        if not df.empty:
+        if not df.empty and "Author" in df.columns:
+            # We draaien de volgorde om (nieuwste boven)
             for index, row in df.iloc[::-1].iterrows():
                 icon = "🖤" if row['Author'] == me else "🌹"
+                
                 with st.expander(f"{icon} {row['Title']} ({row['Date']})"):
                     st.markdown(f"**From:** {row['Author']}")
                     st.markdown(f"""
                     <div class="letter-paper" style="margin-top: 5px; padding: 15px; font-size: 16px;">
-                        {row['Message'].replace(chr(10), '<br>')}
+                        {str(row['Message']).replace(chr(10), '<br>')}
                     </div>
                     """, unsafe_allow_html=True)
         else:
